@@ -88,8 +88,13 @@ claude plugin install github:com55/pywebview-mcp
 **From MCP (recommended — zero project setup):**
 
 ```
-launch_app(cwd="/path/to/project")
+launch_app(cwd="/path/to/project")                              # main.py at root
+launch_app(cwd="/path/to/project", script="app.py")             # other name at root
+launch_app(cwd="/path/to/project", script="backend/gui.py")   # entry in subfolder
+get_launch_help()                                               # full script decision guide
 ```
+
+`cwd` is the project root (`pyproject.toml`). `script` is the entry `.py` **relative to cwd**.
 
 **Manual equivalent:**
 

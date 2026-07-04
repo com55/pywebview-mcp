@@ -12,8 +12,11 @@ import os
 import runpy
 import sys
 
+from pywebview_mcp.cdp_env import ensure_webview2_cdp_flags
+
 
 def _patch_webview() -> None:
+    ensure_webview2_cdp_flags()
     import webview
 
     from pywebview_mcp.bridge import install_bridge, register_window

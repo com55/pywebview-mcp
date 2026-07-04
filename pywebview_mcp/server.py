@@ -9,49 +9,30 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import signal
 import subprocess
 import sys
 import tempfile
 import time
-from typing import IO
+from typing import Annotated, IO
 
 import httpx
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
+from pydantic import Field
+
+from pywebview_mcp.cdp_env import ensure_webview2_cdp_flags
+from pywebview_mcp.launch import (
+    LAUNCH_EXAMPLE,
+    SCRIPT_GUIDE,
+    TIMEOUT_HINTS,
+    launch_error,
+    prepare_launch,
+)
 
 PORT = int(os.environ.get("PYWEBVIEW_MCP_PORT", "7891"))
 CDP_PORT = int(os.environ.get("PYWEBVIEW_MCP_CDP_PORT", "9222"))
 BRIDGE = f"http://127.0.0.1:{PORT}"
-
-_DEFAULT_PACKAGE = "pywebview-mcp @ git+https://github.com/com55/pywebview-mcp"
-
-
-def _mcp_package_spec() -> str:
-    """PyPI/git spec passed to ``uv run --with`` (override via PYWEBVIEW_MCP_PACKAGE)."""
-    return os.environ.get("PYWEBVIEW_MCP_PACKAGE", _DEFAULT_PACKAGE)
-
-
-def _launch_argv(
-    script: str = "main.py",
-    app_args: list[str] | None = None,
-) -> list[str]:
-    """
-    Build argv for plug-and-play launch: project deps from ``uv run`` + bridge via ``--with``.
-    No pywebview-mcp entry in the target project's pyproject.toml required.
-    """
-    return [
-        "uv",
-        "run",
-        "--with",
-        _mcp_package_spec(),
-        "python",
-        "-m",
-        "pywebview_mcp",
-        script,
-        *(app_args or []),
-    ]
 
 _client: httpx.Client | None = None
 _procs: dict[int, subprocess.Popen] = {}
@@ -92,15 +73,26 @@ mcp = FastMCP(
     "pywebview-mcp",
     instructions=(
         "Controls and inspects a running pywebview application, like Playwright for web UIs.\n\n"
-        "PREFERRED WAY TO START THE APP: call launch_app(cwd='/path/to/project'). "
-        "It uses ``uv run --with pywebview-mcp`` so the target project needs NO extra "
-        "dependencies or source changes. The bridge is injected by monkey-patching "
-        "webview.start. Do NOT add pywebview-mcp to the user's pyproject.toml.\n\n"
-        "If the app is already running and reachable, you can skip launch_app(). "
-        "After the app is up, always start with screenshot() + get_dom_tree() to orient "
-        "yourself, then use element IDs from the tree for subsequent operations.\n\n"
-        "For apps with js_api, prefer call_api() to query state or trigger "
-        "actions without DOM clicks. Use eval_js() for arbitrary page JavaScript."
+        "=== START THE APP (required first step) ===\n"
+        "Call launch_app(cwd=..., script=..., app_args=..., timeout=...).\n\n"
+        "Parameters:\n"
+        "  cwd (REQUIRED): absolute project root — folder with pyproject.toml.\n"
+        "  script (optional, default main.py): entry .py RELATIVE to cwd.\n"
+        "    - main.py at root → omit script\n"
+        "    - other name at root → script='app.py'\n"
+        "    - in subfolder → script='src/run.py' or script='backend/gui.py'\n"
+        "    cwd stays project root even when script is in a subfolder.\n"
+        "  app_args: CLI flags for the script, e.g. ['--verbose']\n"
+        "  timeout: default 45; use 60+ for slow cold starts\n\n"
+        "Examples:\n"
+        f"  {json.dumps({'cwd': '/abs/project'})}\n"
+        f"  {json.dumps({'cwd': '/abs/project', 'script': 'app.py'})}\n"
+        f"  {json.dumps({'cwd': '/abs/project', 'script': 'backend/gui.py', 'app_args': ['--flag']})}\n\n"
+        "If unsure about the entry file, call get_launch_help() or list the project root first.\n"
+        "Do NOT pass command= or shell strings. Do NOT add pywebview-mcp to pyproject.toml.\n\n"
+        "=== AFTER LAUNCH ===\n"
+        "screenshot() + get_dom_tree() to orient. Prefer call_api() when js_api exists.\n"
+        "If launch fails: get_app_output() for stderr; get_app_status() for process health."
     ),
 )
 
@@ -443,47 +435,135 @@ def call_api(method: str, args: list | None = None, kwargs: dict | None = None) 
 
 
 @mcp.tool()
+def get_launch_help() -> str:
+    """
+    Return how to call launch_app — especially the script parameter.
+
+    Call this before launch_app when you are unsure which entry .py to use or
+    whether script should include a subfolder path.
+    """
+    return json.dumps(
+        {
+            "launch_example": LAUNCH_EXAMPLE,
+            "script_guide": SCRIPT_GUIDE,
+            "launch_app_parameters": {
+                "cwd": "REQUIRED — absolute project root (pyproject.toml directory)",
+                "script": "optional — entry .py relative to cwd; default main.py",
+                "app_args": "optional — CLI flags, e.g. ['--verbose']",
+                "timeout": "optional — seconds to wait; default 45",
+            },
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
 def launch_app(
-    cwd: str | None = None,
-    port: int = 7891,
-    timeout: int = 45,
-    script: str = "main.py",
-    app_args: list[str] | None = None,
-    command: str | None = None,
+    cwd: Annotated[
+        str,
+        Field(
+            description=(
+                "REQUIRED. Absolute path to the pywebview project root — the folder "
+                "that contains pyproject.toml (same directory you would cd into before "
+                "running the app). Example: C:/dev/my-app or /home/dev/my-app"
+            ),
+        ),
+    ],
+    script: Annotated[
+        str,
+        Field(
+            description=(
+                "Entry .py path RELATIVE to cwd (not absolute). Default: main.py. "
+                "Omit or keep default when main.py is at project root. "
+                "Use script='app.py' if the entry has another name at root. "
+                "Use script='src/run.py' or script='backend/gui.py' if the entry is in a "
+                "subfolder — cwd must still be the project root, not the subfolder."
+            ),
+        ),
+    ] = "main.py",
+    app_args: Annotated[
+        list[str] | None,
+        Field(
+            description="Optional CLI arguments forwarded to the script, e.g. ['--verbose'].",
+        ),
+    ] = None,
+    port: Annotated[
+        int,
+        Field(description="Bridge HTTP port. Default 7891."),
+    ] = 7891,
+    timeout: Annotated[
+        int,
+        Field(description="Seconds to wait for UI readiness. Default 45; use 60–90 for cold starts."),
+    ] = 45,
+    command: Annotated[
+        str | None,
+        Field(
+            description=(
+                "DEPRECATED — ignored. Do not use. Older MCP schemas listed this as "
+                "required; pass cwd instead."
+            ),
+        ),
+    ] = None,
 ) -> str:
     """
-    Launch a pywebview app with the MCP bridge pre-injected, then wait until ready.
+    Launch a pywebview app with the MCP bridge injected, then wait until the UI is ready.
 
-    Plug-and-play: uses ``uv run --with pywebview-mcp@git`` in ``cwd`` so the target
-    project needs no pywebview-mcp dependency. Only ``cwd`` is required in most cases:
+    Parameters
+    ----------
+    cwd : REQUIRED absolute path to project root (directory with pyproject.toml).
+    script : Entry .py relative to cwd. Default main.py. See script examples below.
+    app_args : Optional CLI arguments forwarded to the script.
+    timeout : Seconds to wait for readiness (default 45).
 
-      launch_app(cwd="/path/to/your-project", app_args=["--verbose"])
+    script — when to set it
+    -----------------------
+    | Entry location              | script value        |
+    | main.py at project root     | omit (default)      |
+    | app.py at project root      | "app.py"            |
+    | src/run.py                  | "src/run.py"        |
+    | backend/gui.py              | "backend/gui.py"    |
 
-    ``command`` overrides the auto-built argv (advanced use only).
-    timeout defaults to 45s for slow cold starts (heavy startup work, large mod lists, etc.).
+    cwd is always the project root, even when script points into a subfolder.
+
+    Examples
+    --------
+      launch_app(cwd="/abs/project")
+      launch_app(cwd="/abs/project", script="app.py")
+      launch_app(cwd="/abs/project", script="backend/gui.py", app_args=["--verbose"])
+
+    Call get_launch_help() for the full script decision guide.
+
+    Do NOT pass command= or run shell strings yourself.
     """
+    prepared = prepare_launch(
+        cwd=cwd,
+        script=script,
+        app_args=app_args,
+        legacy_command=command,
+    )
+    if isinstance(prepared, str):
+        return prepared
+    argv, resolved_cwd, resolved_script = prepared
+
     bridge_url = f"http://127.0.0.1:{port}"
     env = {
         **os.environ,
         "PYWEBVIEW_MCP_PORT": str(port),
         "PYWEBVIEW_MCP_CDP_PORT": str(CDP_PORT),
     }
+    ensure_webview2_cdp_flags()
+    env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = os.environ.get(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", ""
+    )
 
     log_path = _app_log_path(port)
     log_file = open(log_path, "w", encoding="utf-8")
     _proc_logs.pop(port, None)
     _proc_logs[port] = log_file
 
-    if command is not None:
-        argv = shlex.split(command, posix=(sys.platform != "win32"))
-    else:
-        if cwd is None:
-            return json.dumps({"error": "Provide cwd (project root with pyproject.toml or venv)"})
-        argv = _launch_argv(script, app_args)
-
     popen_kwargs: dict = {
         "args": argv,
-        "cwd": cwd,
+        "cwd": resolved_cwd,
         "env": env,
         "stdout": log_file,
         "stderr": subprocess.STDOUT,
@@ -510,13 +590,18 @@ def launch_app(
             if r.status_code == 200:
                 last_ready = r.json()
                 if last_ready.get("ready"):
-                    return json.dumps({
+                    payload: dict = {
                         "ok": True,
                         "pid": proc.pid,
                         "log_file": log_path,
+                        "cwd": resolved_cwd,
+                        "script": resolved_script,
                         "argv": argv,
                         "ready": last_ready,
-                    })
+                    }
+                    if command:
+                        payload["deprecated_command_ignored"] = command
+                    return json.dumps(payload)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ReadError):
             pass
         time.sleep(0.4)
@@ -526,15 +611,21 @@ def launch_app(
             "error": f"App started but UI not ready within {timeout}s",
             "pid": proc.pid,
             "log_file": log_path,
+            "cwd": resolved_cwd,
+            "argv": argv,
             "ready": last_ready,
             "output": _read_log_tail(port, 50),
+            "hints": TIMEOUT_HINTS,
         })
     _kill_proc_tree(proc)
     return json.dumps({
         "error": f"Bridge did not start within {timeout}s",
         "pid": proc.pid,
         "log_file": log_path,
+        "cwd": resolved_cwd,
+        "argv": argv,
         "output": _read_log_tail(port, 50),
+        "hints": TIMEOUT_HINTS,
     })
 
 

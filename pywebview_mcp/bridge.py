@@ -121,7 +121,11 @@ def _cdp_screenshot(cdp_port: int, url_hint: str | None = None, clip: dict | Non
             "Ensure REMOTE_DEBUGGING_PORT is set (edgechromium/qt renderer)."
         )
 
-    ws = create_connection(target["webSocketDebuggerUrl"], timeout=5)
+    ws = create_connection(
+        target["webSocketDebuggerUrl"],
+        timeout=5,
+        header=["Origin: http://127.0.0.1"],
+    )
     try:
         msg_id = 1
         params: dict[str, Any] = {"format": "png"}

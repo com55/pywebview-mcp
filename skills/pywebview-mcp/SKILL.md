@@ -29,9 +29,25 @@ The target project must already use pywebview and be runnable via `uv run` in it
 
 ### 1. Launch the app
 
+**Required:** `cwd` (absolute project root).  
+**Optional:** `script` (entry `.py` relative to cwd), `app_args`, `timeout`.
+
+| Entry location | Call |
+|----------------|------|
+| `main.py` at project root | `launch_app(cwd="/abs/project")` |
+| other name at root, e.g. `app.py` | `launch_app(cwd="/abs/project", script="app.py")` |
+| in subfolder, e.g. `backend/gui.py` | `launch_app(cwd="/abs/project", script="backend/gui.py")` |
+
+`cwd` is always the project root (where `pyproject.toml` lives), **not** the folder containing the `.py` file.
+
+If unsure, call `get_launch_help()` first or list the project root before launching.
+
 ```
-launch_app(cwd="/path/to/your-project", timeout=60)
+launch_app(cwd="/absolute/path/to/your-project")
+launch_app(cwd="/absolute/path/to/your-project", script="src/run.py", app_args=["--verbose"], timeout=60)
 ```
+
+Do not pass `command=` or shell strings.
 
 ### 2. Orient yourself
 
@@ -61,7 +77,8 @@ get_app_output(n=50)
 
 | Tool | What it does |
 |------|-------------|
-| `launch_app(cwd, app_args?, port?, timeout?)` | Spawn app via `uv run --with` — no project install needed |
+| `get_launch_help()` | How to set cwd, script, app_args before launch |
+| `launch_app(cwd, script?, app_args?, port?, timeout?)` | Spawn app via `uv run --with` — no project install needed |
 | `stop_app(port)` | Stop a previously launched app |
 | `screenshot(element_id?)` | Capture page or element via CDP |
 | `get_dom_tree()` | Full DOM hierarchy with element IDs |
