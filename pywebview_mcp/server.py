@@ -89,7 +89,8 @@ mcp = FastMCP(
         f"  {json.dumps({'cwd': '/abs/project', 'script': 'app.py'})}\n"
         f"  {json.dumps({'cwd': '/abs/project', 'script': 'backend/gui.py', 'app_args': ['--flag']})}\n\n"
         "If unsure about the entry file, call get_launch_help() or list the project root first.\n"
-        "Do NOT pass command= or shell strings. Do NOT add pywebview-mcp to pyproject.toml.\n\n"
+        "Do NOT pass command= or shell strings. Do NOT add pywebview-mcp to pyproject.toml.\n"
+        "Bridge injection uses the MCP server's pywebview-mcp via PYTHONPATH (no git fetch per launch).\n\n"
         "=== AFTER LAUNCH ===\n"
         "screenshot() + get_dom_tree() to orient. Prefer call_api() when js_api exists.\n"
         "If launch fails: get_app_output() for stderr; get_app_status() for process health."
@@ -531,9 +532,9 @@ def launch_app(
       launch_app(cwd="/abs/project", script="app.py")
       launch_app(cwd="/abs/project", script="backend/gui.py", app_args=["--verbose"])
 
-    Call get_launch_help() for the full script decision guide.
-
-    Do NOT pass command= or run shell strings yourself.
+    No pywebview-mcp install in the target project is needed. argv is built as:
+      uv run python -u -m pywebview_mcp <script> [app_args…]
+    Bridge code comes from the MCP server's install via PYTHONPATH (fast — no git fetch).
     """
     prepared = prepare_launch(
         cwd=cwd,
@@ -543,11 +544,12 @@ def launch_app(
     )
     if isinstance(prepared, str):
         return prepared
-    argv, resolved_cwd, resolved_script = prepared
+    argv, resolved_cwd, resolved_script, env_overrides = prepared
 
     bridge_url = f"http://127.0.0.1:{port}"
     env = {
         **os.environ,
+        **env_overrides,
         "PYWEBVIEW_MCP_PORT": str(port),
         "PYWEBVIEW_MCP_CDP_PORT": str(CDP_PORT),
     }
@@ -579,12 +581,21 @@ def launch_app(
     last_ready: dict | None = None
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            return json.dumps({
+            output = _read_log_tail(port, 50)
+            payload: dict = {
                 "error": f"App exited early with code {proc.returncode}",
                 "pid": proc.pid,
                 "log_file": log_path,
-                "output": _read_log_tail(port, 50),
-            })
+                "output": output,
+            }
+            if proc.returncode == 0 and (
+                "Another instance" in output or "already running" in output.lower()
+            ):
+                payload["hint"] = (
+                    "Single-instance app: close the existing window or call stop_app(), "
+                    "then launch_app again."
+                )
+            return json.dumps(payload)
         try:
             r = httpx.get(f"{bridge_url}/ready", timeout=1)
             if r.status_code == 200:

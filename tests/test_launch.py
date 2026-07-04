@@ -1,10 +1,14 @@
 import json
+import os
 from pathlib import Path
 
 import httpx
 
+from pywebview_mcp import launch as launch_mod
 from pywebview_mcp.launch import (
+    bridge_package_root,
     launch_argv,
+    launch_env_overrides,
     launch_error,
     prepare_launch,
     resolve_entry_script,
@@ -13,11 +17,35 @@ from pywebview_mcp.launch import (
 from pywebview_mcp.server import _app_status_from, _should_retry
 
 
-def test_launch_argv_plug_and_play():
+def test_launch_argv_default_uses_pythonpath_not_with(monkeypatch):
+    monkeypatch.delenv("PYWEBVIEW_MCP_USE_WITH", raising=False)
     argv = launch_argv("main.py", ["--after-update"])
+    assert argv == [
+        "uv",
+        "run",
+        "python",
+        "-u",
+        "-m",
+        "pywebview_mcp",
+        "main.py",
+        "--after-update",
+    ]
+
+
+def test_launch_argv_with_mode(monkeypatch):
+    monkeypatch.setenv("PYWEBVIEW_MCP_USE_WITH", "1")
+    argv = launch_argv("main.py", ["--flag"])
     assert argv[:4] == ["uv", "run", "--with", "pywebview-mcp @ git+https://github.com/com55/pywebview-mcp"]
-    assert argv[4:8] == ["python", "-m", "pywebview_mcp", "main.py"]
-    assert argv[8:] == ["--after-update"]
+    assert "-u" in argv
+
+
+def test_launch_env_overrides_pythonpath(monkeypatch):
+    monkeypatch.delenv("PYWEBVIEW_MCP_USE_WITH", raising=False)
+    root = bridge_package_root()
+    assert root is not None
+    overrides = launch_env_overrides()
+    assert overrides["PYTHONUNBUFFERED"] == "1"
+    assert root in overrides["PYTHONPATH"]
 
 
 def test_prepare_launch_requires_cwd():
@@ -41,16 +69,18 @@ def test_prepare_launch_rejects_legacy_command_without_cwd():
     assert "Do NOT pass command" in body["hint"]
 
 
-def test_prepare_launch_ok(tmp_path: Path):
+def test_prepare_launch_ok(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("PYWEBVIEW_MCP_USE_WITH", raising=False)
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     (tmp_path / "main.py").write_text("print('hi')\n")
     result = prepare_launch(cwd=str(tmp_path), script="main.py", app_args=["--flag"])
     assert isinstance(result, tuple)
-    argv, resolved_cwd, resolved_script = result
-    assert "--with" in argv
+    argv, resolved_cwd, resolved_script, env_overrides = result
+    assert "--with" not in argv
     assert argv[-1] == "--flag"
     assert resolved_script == "main.py"
     assert Path(resolved_cwd) == tmp_path.resolve()
+    assert "PYTHONPATH" in env_overrides
 
 
 def test_resolve_entry_script_fallback(tmp_path: Path):
@@ -105,3 +135,13 @@ def test_script_guide_in_script_not_found_error(tmp_path: Path):
     body = json.loads(result)
     assert "script_guide" in body
     assert any("subfolder" in r for r in body["script_guide"]["rules"])
+
+
+def test_prepare_launch_fails_without_bridge_package(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("PYWEBVIEW_MCP_USE_WITH", raising=False)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    (tmp_path / "main.py").write_text("")
+    monkeypatch.setattr(launch_mod, "bridge_package_root", lambda: None)
+    result = prepare_launch(cwd=str(tmp_path), script="main.py", app_args=None)
+    body = json.loads(result)
+    assert "PYTHONPATH" in body["error"]

@@ -58,19 +58,67 @@ def mcp_package_spec() -> str:
     return os.environ.get("PYWEBVIEW_MCP_PACKAGE", _DEFAULT_PACKAGE)
 
 
+def _use_with_launch() -> bool:
+    """Opt-in slow path: fetch pywebview-mcp via ``uv run --with`` on every launch."""
+    return os.environ.get("PYWEBVIEW_MCP_USE_WITH", "").lower() in ("1", "true", "yes")
+
+
+def bridge_package_root() -> str | None:
+    """
+    Directory containing the ``pywebview_mcp`` package from the running MCP server install.
+    Used for PYTHONPATH injection — avoids a git fetch on every launch.
+    """
+    try:
+        import pywebview_mcp
+    except ImportError:
+        return None
+    return str(Path(pywebview_mcp.__file__).resolve().parent.parent)
+
+
 def launch_argv(script: str = "main.py", app_args: list[str] | None = None) -> list[str]:
-    """Plug-and-play argv: project deps via uv + bridge injected via --with."""
+    """
+    Build argv for plug-and-play launch.
+
+    Default: ``uv run python -m pywebview_mcp`` with bridge on PYTHONPATH (fast).
+    Set PYWEBVIEW_MCP_USE_WITH=1 to use ``uv run --with pywebview-mcp@git`` instead (slow).
+    """
+    if _use_with_launch():
+        return [
+            "uv",
+            "run",
+            "--with",
+            mcp_package_spec(),
+            "python",
+            "-u",
+            "-m",
+            "pywebview_mcp",
+            script,
+            *(app_args or []),
+        ]
     return [
         "uv",
         "run",
-        "--with",
-        mcp_package_spec(),
         "python",
+        "-u",
         "-m",
         "pywebview_mcp",
         script,
         *(app_args or []),
     ]
+
+
+def launch_env_overrides() -> dict[str, str]:
+    """Env vars merged into the app subprocess (unbuffered stdout + bridge PYTHONPATH)."""
+    overrides: dict[str, str] = {"PYTHONUNBUFFERED": "1"}
+    if _use_with_launch():
+        return overrides
+    root = bridge_package_root()
+    if root is None:
+        return overrides
+    sep = os.pathsep
+    existing = os.environ.get("PYTHONPATH", "")
+    overrides["PYTHONPATH"] = f"{root}{sep}{existing}" if existing else root
+    return overrides
 
 
 def launch_error(message: str, *, hint: str | None = None, **extra: object) -> str:
@@ -108,9 +156,10 @@ def prepare_launch(
     script: str,
     app_args: list[str] | None,
     legacy_command: str | None = None,
-) -> tuple[list[str], str, str] | str:
+) -> tuple[list[str], str, str, dict[str, str]] | str:
     """
-    Validate inputs and return (argv, resolved_cwd, resolved_script) or an error JSON string.
+    Validate inputs and return (argv, resolved_cwd, resolved_script, env_overrides)
+    or an error JSON string.
     """
     if not cwd or not str(cwd).strip():
         extra: dict = {}
@@ -121,7 +170,7 @@ def prepare_launch(
             hint=(
                 "Pass cwd as the ABSOLUTE path to the project root (folder with pyproject.toml). "
                 "Do NOT pass command= — launch_app runs "
-                "'uv run --with pywebview-mcp python -m pywebview_mcp <script>' for you."
+                "'uv run python -m pywebview_mcp <script>' with the bridge on PYTHONPATH."
             ),
             **extra,
         )
@@ -147,11 +196,18 @@ def prepare_launch(
         )
 
     argv = launch_argv(resolved_script, app_args)
-    return argv, resolved_cwd, resolved_script
+    env_overrides = launch_env_overrides()
+    if not _use_with_launch() and bridge_package_root() is None:
+        return launch_error(
+            "Cannot locate pywebview_mcp package for PYTHONPATH launch",
+            hint="Set PYWEBVIEW_MCP_USE_WITH=1 on the MCP server to use uv --with git fallback.",
+        )
+    return argv, resolved_cwd, resolved_script, env_overrides
 
 
 TIMEOUT_HINTS = [
-    "Increase timeout to 60–90 for cold starts (large scans, first uv sync).",
-    "Another instance may already be running — close it or use stop_app() first.",
+    "Another instance may already be running — close it or call stop_app() first.",
     "Call get_app_output() to read stdout/stderr from the failed launch.",
+    "If the log is empty for a long time, the app may be stuck before webview.start — check for native dialogs.",
+    "Increase timeout to 60–90 for cold starts (large mod scans, first uv sync).",
 ]
