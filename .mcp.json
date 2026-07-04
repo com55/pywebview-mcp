@@ -1,0 +1,6 @@
+{
+  "pywebview": {
+    "command": "uvx",
+    "args": ["--from", "git+https://github.com/com55/pywebview-mcp", "pywebview-mcp"]
+  }
+}
