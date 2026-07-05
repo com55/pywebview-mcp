@@ -562,6 +562,13 @@ def launch_app(
     log_file = open(log_path, "w", encoding="utf-8")
     _proc_logs.pop(port, None)
     _proc_logs[port] = log_file
+    log_file.write(
+        f"# launch_app pid pending\n"
+        f"# cwd={resolved_cwd}\n"
+        f"# argv={' '.join(argv)}\n"
+        f"# PYTHONPATH={env.get('PYTHONPATH', '')}\n"
+    )
+    log_file.flush()
 
     popen_kwargs: dict = {
         "args": argv,
@@ -576,8 +583,11 @@ def launch_app(
         popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(**popen_kwargs)
     _procs[port] = proc
+    log_file.write(f"# child_pid={proc.pid}\n")
+    log_file.flush()
 
     deadline = time.monotonic() + timeout
+    bridge_up = False
     last_ready: dict | None = None
     while time.monotonic() < deadline:
         if proc.poll() is not None:
@@ -597,25 +607,54 @@ def launch_app(
                 )
             return json.dumps(payload)
         try:
-            r = httpx.get(f"{bridge_url}/ready", timeout=1)
-            if r.status_code == 200:
-                last_ready = r.json()
-                if last_ready.get("ready"):
-                    payload: dict = {
-                        "ok": True,
-                        "pid": proc.pid,
-                        "log_file": log_path,
-                        "cwd": resolved_cwd,
-                        "script": resolved_script,
-                        "argv": argv,
-                        "ready": last_ready,
-                    }
-                    if command:
-                        payload["deprecated_command_ignored"] = command
-                    return json.dumps(payload)
+            health = httpx.get(f"{bridge_url}/health", timeout=1)
+            if health.status_code == 200:
+                bridge_up = True
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ReadError):
             pass
+
+        if bridge_up:
+            try:
+                r = httpx.get(f"{bridge_url}/ready", timeout=2, params={"quiet_ms": 500})
+                if r.status_code == 200:
+                    last_ready = r.json()
+                    if last_ready.get("ready"):
+                        payload = {
+                            "ok": True,
+                            "pid": proc.pid,
+                            "log_file": log_path,
+                            "cwd": resolved_cwd,
+                            "script": resolved_script,
+                            "argv": argv,
+                            "bridge_up": True,
+                            "ui_ready": True,
+                            "ready": last_ready,
+                        }
+                        if command:
+                            payload["deprecated_command_ignored"] = command
+                        return json.dumps(payload)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ReadError):
+                pass
         time.sleep(0.4)
+
+    output = _read_log_tail(port, 50)
+    if bridge_up:
+        return json.dumps({
+            "ok": True,
+            "pid": proc.pid,
+            "log_file": log_path,
+            "cwd": resolved_cwd,
+            "script": resolved_script,
+            "argv": argv,
+            "bridge_up": True,
+            "ui_ready": bool(last_ready and last_ready.get("ready")),
+            "ready": last_ready,
+            "output": output,
+            "hint": (
+                "Bridge HTTP is up. /ready may be slow on busy UIs — "
+                "call wait_until_ready() or use get_dom_tree() / call_api() now."
+            ),
+        })
 
     if last_ready is not None:
         return json.dumps({
@@ -625,7 +664,7 @@ def launch_app(
             "cwd": resolved_cwd,
             "argv": argv,
             "ready": last_ready,
-            "output": _read_log_tail(port, 50),
+            "output": output,
             "hints": TIMEOUT_HINTS,
         })
     _kill_proc_tree(proc)
@@ -635,7 +674,7 @@ def launch_app(
         "log_file": log_path,
         "cwd": resolved_cwd,
         "argv": argv,
-        "output": _read_log_tail(port, 50),
+        "output": output,
         "hints": TIMEOUT_HINTS,
     })
 

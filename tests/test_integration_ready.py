@@ -41,6 +41,34 @@ def _wait_ready(base: str, timeout: float = 30) -> dict:
 
 
 @pytest.mark.integration
+def test_health_endpoint(free_port):
+    cdp = _free_cdp_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "pywebview_mcp", EXAMPLE],
+        env={
+            **_env(),
+            "PYWEBVIEW_MCP_PORT": str(free_port),
+            "PYWEBVIEW_MCP_CDP_PORT": str(cdp),
+        },
+    )
+    base = f"http://127.0.0.1:{free_port}"
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                r = httpx.get(f"{base}/health", timeout=1)
+                if r.status_code == 200 and r.json().get("ok"):
+                    return
+            except httpx.HTTPError:
+                pass
+            time.sleep(0.3)
+        raise AssertionError("bridge /health never responded")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+@pytest.mark.integration
 def test_ready_endpoint_reports_ready(free_port):
     cdp = _free_cdp_port()
     proc = subprocess.Popen(

@@ -255,6 +255,15 @@ def _app_info() -> dict:
     return info
 
 
+def _health() -> dict:
+    """Instant liveness probe — no evaluate_js (safe while the UI thread is busy)."""
+    return {
+        "ok": True,
+        "bridge": True,
+        "has_window": _window is not None,
+    }
+
+
 def _quit() -> dict:
     if _window is None:
         return {"error": "No window"}
@@ -339,6 +348,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send({"logs": _log_records[-n:]})
             elif path == "/app":
                 self._send(_app_info())
+            elif path == "/health":
+                self._send(_health())
             elif path == "/ready":
                 quiet = float(qs.get("quiet_ms", ["500"])[0])
                 self._send(_readiness(quiet))
